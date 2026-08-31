@@ -4,7 +4,7 @@ import { supabaseAdmin } from '@/lib/supabase';
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 async function answerCallbackQuery(callbackQueryId: string, text?: string) {
-  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+  const res = await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -12,6 +12,7 @@ async function answerCallbackQuery(callbackQueryId: string, text?: string) {
       text: text || '',
     }),
   });
+  return res.json();
 }
 
 async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: object) {
@@ -21,11 +22,15 @@ async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: o
     body: JSON.stringify({
       chat_id: chatId,
       text,
-      parse_mode: 'HTML', // Switched to HTML for uniform stability
+      parse_mode: 'HTML',
       reply_markup: replyMarkup,
     }),
   });
-  return res.json();
+  const data = await res.json();
+  if (!data.ok) {
+    console.error(`Telegram Send Message Error (chat: ${chatId}):`, data);
+  }
+  return data;
 }
 
 export async function POST(req: Request) {
@@ -66,7 +71,6 @@ export async function POST(req: Request) {
       if (data.startsWith('zone:')) {
         const zone = data.split(':')[1];
 
-        // Upsert donor with zone
         await supabaseAdmin.from('donors').upsert(
           {
             telegram_chat_id: chatId,
