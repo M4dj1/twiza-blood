@@ -86,6 +86,36 @@ export async function POST(req: Request) {
         }
       }
 
+      // Stage 3: Donor Accepts Emergency Alert (Pledge)
+        if (data.startsWith('pledge:')) {
+        const ticketId = data.split(':')[1];
+
+        // 1. Fetch donor ID
+        const { data: donor } = await supabaseAdmin
+            .from('donors')
+            .select('id')
+            .eq('telegram_chat_id', chatId)
+            .single();
+
+        if (donor) {
+            // 2. Insert Pledge Commitment
+            const { error: pledgeError } = await supabaseAdmin.from('pledges').insert({
+            ticket_id: ticketId,
+            donor_id: donor.id,
+            status: 'committed',
+            });
+
+            if (pledgeError) {
+            await sendTelegramMessage(chatId, `⚠️ You have already responded or this emergency slot is full.`);
+            } else {
+            await sendTelegramMessage(
+                chatId,
+                `❤️ *Barak Allahu Feek! / شكراً لجهودك*\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.\n\n_Note: You will receive a automated check-in in 45 minutes to confirm arrival._`
+            );
+            }
+        }
+        }
+
       return NextResponse.json({ ok: true });
     }
 
