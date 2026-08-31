@@ -86,26 +86,25 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Clear, scannable structured layout
+    // 3. Clean, scannable alert card
     const units = units_needed ?? 1;
     const alertText =
-      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n` +
-      `━━━━━━━━━━━━━━━━━━\n\n` +
-      `🏥 <b>المستشفى / Hôpital :</b>\n` +
-      `└ <code>${esc(hospital_name)}</code>\n\n` +
-      `🩸 <b>الفصيلة المطلوبة / Groupe :</b>\n` +
-      `└ <b>[ ${esc(blood_type)} ]</b> — <i>(${units} كيس / poches)</i>\n\n` +
-      `━━━━━━━━━━━━━━━━━━\n` +
+      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n\n` +
+      `🏥 <b>المستشفى:</b> ${esc(hospital_name)}\n` +
+      `🩸 <b>الفصيلة المطلوبة:</b> <b>${esc(blood_type)}</b>\n` +
+      `📦 <b>الاحتياج:</b> ${units} أكياس\n\n` +
       `هل أنت متاح وقادر على التبرع الآن؟`;
 
     const keyboard = {
       inline_keyboard: [
-        [{ text: '✅ أنا مستعد للتبرع (Je peux)', callback_data: `pledge:${emergency.id}` }],
-        [{ text: '❌ لا أستطيع حاليًا (Indisponible)', callback_data: `decline:${emergency.id}` }],
+        [
+          { text: '✅ أنا مستعد للتبرع', callback_data: `pledge:${emergency.id}:${encodeURIComponent(hospital_name)}` },
+          { text: '❌ غير متاح الآن', callback_data: `decline:${emergency.id}` },
+        ],
       ],
     };
 
-    // 4. Send alerts in parallel
+    // 4. Send alerts
     const results = await Promise.allSettled(
       donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
     );

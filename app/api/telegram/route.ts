@@ -63,18 +63,16 @@ async function showBloodTypeKeyboard(chatId: number) {
     ],
   ];
 
-  await sendMsg(
-    chatId,
-    `🩸 <b>تحديد فصيلة الدم</b>\n━━━━━━━━━━━━━━━━━━\nيرجى اختيار فصيلة دمك من القائمة أدناه:`,
-    { inline_keyboard: keyboard }
-  );
+  await sendMsg(chatId, '🩸 <b>اختر فصيلة دمك:</b>', {
+    inline_keyboard: keyboard,
+  });
 }
 
 export async function POST(req: NextRequest) {
   try {
     const update: TelegramUpdate = await req.json();
 
-    // 1. Command: /start
+    // 1. /start command
     if (update.message?.text?.startsWith('/start')) {
       const chatId = update.message.chat.id;
 
@@ -89,24 +87,21 @@ export async function POST(req: NextRequest) {
 
       await sendMsg(
         chatId,
-        `🩸 <b>منصة تـويـزة للتبرع بالدم | Twiza Blood</b>\n` +
-        `━━━━━━━━━━━━━━━━━━\n\n` +
-        `مرحبًا بك! هذه المنصة تربط المتبرعين بالدم مباشرة بحالات الطوارئ في الجزائر بدون أي وساطة.\n\n` +
-        `📍 <b>الخطوة 1/2:</b> اختر ولايتك لتلقي النداءات القريبة منك:`,
+        '🩸 <b>منصة تـويـزة للتبرع بالدم</b>\n\nاختر ولايتك لتلقي نداءات الاستغاثة القريبة منك:',
         { inline_keyboard }
       );
 
       return NextResponse.json({ ok: true });
     }
 
-    // 2. Callback Queries
+    // 2. Button Callbacks
     if (update.callback_query) {
       const callbackId = update.callback_query.id;
       const callbackData = update.callback_query.data || '';
       const chatId = update.callback_query.message?.chat.id || update.callback_query.from.id;
       const messageId = update.callback_query.message?.message_id;
 
-      const [action, value] = callbackData.split(':');
+      const [action, value, extra] = callbackData.split(':');
 
       // Wilaya Selection
       if (action === 'wilaya') {
@@ -126,14 +121,12 @@ export async function POST(req: NextRequest) {
             .eq('wilaya_id', 16);
 
           const inline_keyboard = (zones || []).map((z) => [
-            { text: `🏢 ${z.name} (${z.name_ar})`, callback_data: `zone:${z.id}` },
+            { text: `📍 ${z.name} (${z.name_ar})`, callback_data: `zone:${z.id}` },
           ]);
 
-          await sendMsg(
-            chatId,
-            `📍 <b>تحديد المنطقة - الجزائر العاصمة</b>\n━━━━━━━━━━━━━━━━━━\nاختر المنطقة الجغرافية الأقرب إليك:`,
-            { inline_keyboard }
-          );
+          await sendMsg(chatId, '📍 <b>اختر المنطقة التابعة للجزائر العاصمة:</b>', {
+            inline_keyboard,
+          });
         } else {
           await showBloodTypeKeyboard(chatId);
         }
@@ -152,7 +145,7 @@ export async function POST(req: NextRequest) {
         await showBloodTypeKeyboard(chatId);
       }
 
-      // Blood Type Selection
+      // Blood Selection
       if (action === 'blood') {
         const bloodType = value;
 
@@ -162,47 +155,35 @@ export async function POST(req: NextRequest) {
             { onConflict: 'chat_id' }
           );
 
-          await answerCallback(callbackId, '✅ تم الحفظ بنجاح');
+          await answerCallback(callbackId, '✅ تم الحفظ');
 
           await sendMsg(
             chatId,
-            `✅ <b>اكتمل التسجيل بنجاح</b>\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `🩸 <b>فصيلة الدم المسجلة :</b> <code>${bloodType}</code>\n` +
-            `🔔 <b>حالة الحساب :</b> نشط ومستعد لتلقي الإشعارات\n\n` +
-            `<i>ستصلك إشعارات فورية عند وجود حاجة ماسة لدم من فصيلتك. لتعديل بياناتك في أي وقت، أرسل /start.</i>`
+            `✅ <b>تم تسجيلك بنجاح!</b>\n\n` +
+            `🩸 <b>فصيلة الدم:</b> ${bloodType}\n` +
+            `🔔 ستصلك تنبيهات فورية عند وجود نداءات طارئة في منطقتك.`
           );
         }
       }
 
-      // Donor Action: Accept / Pledge
+      // Donor Confirms (Pledge) -> Single In-Place Card Update
       if (action === 'pledge') {
+        const hospital = extra ? decodeURIComponent(extra) : 'المستشفى';
         await answerCallback(callbackId, '❤️ جزاك الله خيراً');
 
         if (messageId && chatId) {
           await editMessageText(
             chatId,
             messageId,
-            `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `✅ <b>الحالة : تم تأكيد الاستجابة من طرفك</b>\n` +
-            `<i>أنت في طريقك إلى المستشفى لإنقاذ حياة. شكرًا لك!</i>`
+            `✅ <b>تم تأكيد استجابتك للتبرع</b>\n\n` +
+            `🏥 <b>الوجهة:</b> ${hospital}\n` +
+            `📍 يرجى التوجه إلى مصلحة حقن الدم (CTS).\n\n` +
+            `❤️ <i>بارك الله فيك وجعلها في ميزان حسناتك.</i>`
           );
         }
-
-        await sendMsg(
-          chatId,
-          `❤️ <b>شكرًا لاستجابتك النبيلة</b>\n` +
-          `━━━━━━━━━━━━━━━━━━\n\n` +
-          `🏥 <b>الخطوات القادمة :</b>\n` +
-          `1. توجه فورًا إلى <b>مصلحة حقن الدم (CTS)</b> بالمستشفى المذكور.\n` +
-          `2. أخبر مكتب الاستقبال أنك قادم استجابةً لنداء الطوارئ.\n` +
-          `3. احرص على شرب الماء وأخذ قسط من الراحة بعد التبرع.\n\n` +
-          `<i>بارك الله فيك وجعلها في ميزان حسناتك.</i>`
-        );
       }
 
-      // Donor Action: Decline
+      // Donor Declines -> Single In-Place Card Update
       if (action === 'decline') {
         await answerCallback(callbackId, 'شكراً لك');
 
@@ -210,19 +191,10 @@ export async function POST(req: NextRequest) {
           await editMessageText(
             chatId,
             messageId,
-            `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n` +
-            `━━━━━━━━━━━━━━━━━━\n\n` +
-            `❌ <b>الحالة : تم الاعتذار</b>\n` +
-            `<i>نأمل أن تكون قادرًا على المساعدة في نداءات قادمة.</i>`
+            `❌ <b>تم الاعتذار عن هذا النداء</b>\n\n` +
+            `نقدّر وقتك، وسنقوم بإشعارك عند وجود نداءات طارئة أخرى.`
           );
         }
-
-        await sendMsg(
-          chatId,
-          `🙏 <b>تم تسجيل اعتذارك</b>\n` +
-          `━━━━━━━━━━━━━━━━━━\n` +
-          `نقدّر وقتك، وسنقوم بإشعارك عند وجود أي نداء طارئ آخر في منطقتك.`
-        );
       }
 
       return NextResponse.json({ ok: true });
