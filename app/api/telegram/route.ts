@@ -34,39 +34,14 @@ const answerCallback = (callbackQueryId: string, text?: string) =>
     text,
   });
 
-const editMessageText = (chatId: number, messageId: number, text: string) =>
+const editMessage = (chatId: number, messageId: number, text: string, replyMarkup?: object) =>
   sendTelegram('editMessageText', {
     chat_id: chatId,
     message_id: messageId,
     text,
     parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: [] },
+    reply_markup: replyMarkup || { inline_keyboard: [] },
   });
-
-async function showBloodTypeKeyboard(chatId: number) {
-  const keyboard = [
-    [
-      { text: '🩸 O+', callback_data: 'blood:O+' },
-      { text: '🩸 O-', callback_data: 'blood:O-' },
-    ],
-    [
-      { text: '🩸 A+', callback_data: 'blood:A+' },
-      { text: '🩸 A-', callback_data: 'blood:A-' },
-    ],
-    [
-      { text: '🩸 B+', callback_data: 'blood:B+' },
-      { text: '🩸 B-', callback_data: 'blood:B-' },
-    ],
-    [
-      { text: '🩸 AB+', callback_data: 'blood:AB+' },
-      { text: '🩸 AB-', callback_data: 'blood:AB-' },
-    ],
-  ];
-
-  await sendMsg(chatId, '🩸 <b>اختر فصيلة دمك:</b>', {
-    inline_keyboard: keyboard,
-  });
-}
 
 export async function POST(req: NextRequest) {
   try {
@@ -82,7 +57,7 @@ export async function POST(req: NextRequest) {
         .order('id', { ascending: true });
 
       const inline_keyboard = (wilayas || []).map((w) => [
-        { text: `📍 ${w.id} - ${w.name} (${w.name_ar})`, callback_data: `wilaya:${w.id}` },
+        { text: `${w.id} - ${w.name} (${w.name_ar})`, callback_data: `wilaya:${w.id}` },
       ]);
 
       await sendMsg(
@@ -103,7 +78,7 @@ export async function POST(req: NextRequest) {
 
       const [action, value, extra] = callbackData.split(':');
 
-      // Wilaya Selection
+      // Step 1: Wilaya Selected -> Edit card in-place
       if (action === 'wilaya') {
         const wilayaId = parseInt(value, 10);
 
@@ -121,18 +96,24 @@ export async function POST(req: NextRequest) {
             .eq('wilaya_id', 16);
 
           const inline_keyboard = (zones || []).map((z) => [
-            { text: `📍 ${z.name} (${z.name_ar})`, callback_data: `zone:${z.id}` },
+            { text: `${z.name} (${z.name_ar})`, callback_data: `zone:${z.id}` },
           ]);
 
-          await sendMsg(chatId, '📍 <b>اختر المنطقة التابعة للجزائر العاصمة:</b>', {
-            inline_keyboard,
-          });
+          if (messageId && chatId) {
+            await editMessage(
+              chatId,
+              messageId,
+              '📍 <b>اختر المنطقة التابعة للجزائر العاصمة:</b>',
+              { inline_keyboard }
+            );
+          }
         } else {
-          await showBloodTypeKeyboard(chatId);
+          // Other wilayas jump directly to blood selection on the same message
+          await promptBloodType(chatId, messageId);
         }
       }
 
-      // Zone Selection
+      // Step 2: Zone Selected -> Edit card in-place to Blood Types
       if (action === 'zone') {
         const zoneId = parseInt(value, 10);
 
@@ -142,10 +123,10 @@ export async function POST(req: NextRequest) {
         );
 
         await answerCallback(callbackId);
-        await showBloodTypeKeyboard(chatId);
+        await promptBloodType(chatId, messageId);
       }
 
-      // Blood Selection
+      // Step 3: Blood Type Selected -> Final In-Place Badge Transformation
       if (action === 'blood') {
         const bloodType = value;
 
@@ -155,24 +136,39 @@ export async function POST(req: NextRequest) {
             { onConflict: 'chat_id' }
           );
 
-          await answerCallback(callbackId, '✅ تم الحفظ');
+          await answerCallback(callbackId, '✅ تم حفظ البيانات');
 
-          await sendMsg(
-            chatId,
-            `✅ <b>تم تسجيلك بنجاح!</b>\n\n` +
-            `🩸 <b>فصيلة الدم:</b> ${bloodType}\n` +
-            `🔔 ستصلك تنبيهات فورية عند وجود نداءات طارئة في منطقتك.`
-          );
+          // Fetch full profile info to construct the clean badge
+          const { data: donor } = await supabaseAdmin
+            .from('donors')
+            .select('wilayas(name_ar), zones(name_ar)')
+            .eq('chat_id', chatId)
+            .maybeSingle();
+
+          const wilayaName = (donor as any)?.wilayas?.name_ar || 'الجزائر';
+          const zoneName = (donor as any)?.zones?.name_ar ? ` - ${(donor as any)?.zones?.name_ar}` : '';
+
+          if (messageId && chatId) {
+            await editMessage(
+              chatId,
+              messageId,
+              `🩸 <b>بطاقة متبرع | Twiza Blood</b>\n\n` +
+              `👤 <b>الحالة:</b> متبرع نشط ومستعد\n` +
+              `📍 <b>المنطقة:</b> ${wilayaName}${zoneName}\n` +
+              `🩸 <b>فصيلة الدم:</b> <b>${bloodType}</b>\n\n` +
+              `<i>ستصلك تنبيهات فورية عند وجود نداءات طارئة في منطقتك.</i>`
+            );
+          }
         }
       }
 
-      // Donor Confirms (Pledge) -> Single In-Place Card Update
+      // Dispatch Response: Pledge -> Edit card in-place
       if (action === 'pledge') {
         const hospital = extra ? decodeURIComponent(extra) : 'المستشفى';
         await answerCallback(callbackId, '❤️ جزاك الله خيراً');
 
         if (messageId && chatId) {
-          await editMessageText(
+          await editMessage(
             chatId,
             messageId,
             `✅ <b>تم تأكيد استجابتك للتبرع</b>\n\n` +
@@ -183,12 +179,12 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Donor Declines -> Single In-Place Card Update
+      // Dispatch Response: Decline -> Edit card in-place
       if (action === 'decline') {
         await answerCallback(callbackId, 'شكراً لك');
 
         if (messageId && chatId) {
-          await editMessageText(
+          await editMessage(
             chatId,
             messageId,
             `❌ <b>تم الاعتذار عن هذا النداء</b>\n\n` +
@@ -204,5 +200,34 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     console.error('Telegram Webhook error:', error);
     return NextResponse.json({ ok: true });
+  }
+}
+
+async function promptBloodType(chatId: number, messageId?: number) {
+  const keyboard = [
+    [
+      { text: 'O+', callback_data: 'blood:O+' },
+      { text: 'O-', callback_data: 'blood:O-' },
+    ],
+    [
+      { text: 'A+', callback_data: 'blood:A+' },
+      { text: 'A-', callback_data: 'blood:A-' },
+    ],
+    [
+      { text: 'B+', callback_data: 'blood:B+' },
+      { text: 'B-', callback_data: 'blood:B-' },
+    ],
+    [
+      { text: 'AB+', callback_data: 'blood:AB+' },
+      { text: 'AB-', callback_data: 'blood:AB-' },
+    ],
+  ];
+
+  const text = '🩸 <b>اختر فصيلة دمك:</b>';
+
+  if (messageId) {
+    await editMessage(chatId, messageId, text, { inline_keyboard: keyboard });
+  } else {
+    await sendMsg(chatId, text, { inline_keyboard: keyboard });
   }
 }
