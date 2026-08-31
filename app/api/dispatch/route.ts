@@ -86,13 +86,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Prepare bilingual alert message
+    // 3. Clear, scannable structured layout
     const units = units_needed ?? 1;
     const alertText =
-      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم | ALERTE URGENCE</b>\n\n` +
-      `🏥 <b>المستشفى / Hôpital:</b> ${esc(hospital_name)}\n` +
-      `🩸 <b>فصيلة الدم المطلوبة / Groupe:</b> <code>${esc(blood_type)}</code> (${units} كيس/poche)\n\n` +
-      `هل يمكنك التبرع الآن والمساعدة في إنقاذ حياة؟`;
+      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🏥 <b>المستشفى / Hôpital :</b>\n` +
+      `└ <code>${esc(hospital_name)}</code>\n\n` +
+      `🩸 <b>الفصيلة المطلوبة / Groupe :</b>\n` +
+      `└ <b>[ ${esc(blood_type)} ]</b> — <i>(${units} كيس / poches)</i>\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `هل أنت متاح وقادر على التبرع الآن؟`;
 
     const keyboard = {
       inline_keyboard: [
@@ -101,7 +105,7 @@ export async function POST(req: NextRequest) {
       ],
     };
 
-    // 4. Send alerts to all matching donors in parallel
+    // 4. Send alerts in parallel
     const results = await Promise.allSettled(
       donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
     );
