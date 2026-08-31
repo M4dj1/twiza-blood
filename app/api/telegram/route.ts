@@ -1,224 +1,125 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
-import { TelegramUpdate } from '@/types';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-const BLOOD_TYPES = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-'];
-
-async function sendTelegram(method: string, payload: Record<string, unknown>) {
-  try {
-    const res = await fetch(`${TELEGRAM_API}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    return await res.json();
-  } catch (error) {
-    console.error(`Telegram API error (${method}):`, error);
-    return null;
-  }
+function esc(s = '') {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-const sendMsg = (chatId: number, text: string, replyMarkup?: object) =>
-  sendTelegram('sendMessage', {
-    chat_id: chatId,
-    text,
-    parse_mode: 'HTML',
-    reply_markup: replyMarkup,
-  });
-
-const answerCallback = (callbackQueryId: string, text?: string) =>
-  sendTelegram('answerCallbackQuery', {
-    callback_query_id: callbackQueryId,
-    text,
-  });
-
-// Helper to remove buttons and append the final response status
-const editMessageText = (chatId: number, messageId: number, text: string) =>
-  sendTelegram('editMessageText', {
-    chat_id: chatId,
-    message_id: messageId,
-    text,
-    parse_mode: 'HTML',
-    reply_markup: { inline_keyboard: [] }, // Clears buttons
-  });
-
-async function showBloodTypeKeyboard(chatId: number) {
-  const keyboard = [
-    [
-      { text: 'O+', callback_data: 'blood:O+' },
-      { text: 'O-', callback_data: 'blood:O-' },
-    ],
-    [
-      { text: 'A+', callback_data: 'blood:A+' },
-      { text: 'A-', callback_data: 'blood:A-' },
-    ],
-    [
-      { text: 'B+', callback_data: 'blood:B+' },
-      { text: 'B-', callback_data: 'blood:B-' },
-    ],
-    [
-      { text: 'AB+', callback_data: 'blood:AB+' },
-      { text: 'AB-', callback_data: 'blood:AB-' },
-    ],
-  ];
-
-  await sendMsg(chatId, '🩸 <b>اختر فصيلة الدم الخاصة بك:</b>', {
-    inline_keyboard: keyboard,
-  });
+async function sendTelegramAlert(chatId: number, text: string, keyboard: object): Promise<boolean> {
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      }),
+    });
+    const data = await res.json().catch(() => null);
+    return data?.ok === true;
+  } catch (err) {
+    console.error(`Telegram fetch failed for ${chatId}:`, err);
+    return false;
+  }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const update: TelegramUpdate = await req.json();
+    const body = await req.json();
+    const { hospital_name, wilaya_id, zone_id, blood_type, units_needed } = body;
 
-    // 1. Command: /start
-    if (update.message?.text?.startsWith('/start')) {
-      const chatId = update.message.chat.id;
-
-      const { data: wilayas } = await supabaseAdmin
-        .from('wilayas')
-        .select('*')
-        .order('id', { ascending: true });
-
-      const inline_keyboard = (wilayas || []).map((w) => [
-        { text: `${w.id} - ${w.name} (${w.name_ar})`, callback_data: `wilaya:${w.id}` },
-      ]);
-
-      await sendMsg(
-        chatId,
-        '🩸 <b>مرحبًا بك في منصة تـويـزة للتبرع بالدم</b>\n\nيرجى اختيار الولاية الخاصة بك لتلقي نداءات الاستغاثة القريبة منك:',
-        { inline_keyboard }
+    if (!hospital_name || !wilaya_id || !blood_type) {
+      return NextResponse.json(
+        { error: 'hospital_name, wilaya_id, and blood_type are required' },
+        { status: 400 }
       );
-
-      return NextResponse.json({ ok: true });
     }
 
-    // 2. Callback Queries
-    if (update.callback_query) {
-      const callbackId = update.callback_query.id;
-      const callbackData = update.callback_query.data || '';
-      const chatId = update.callback_query.message?.chat.id || update.callback_query.from.id;
-      const messageId = update.callback_query.message?.message_id;
+    // 1. Create emergency ticket
+    const { data: emergency, error: emergencyError } = await supabaseAdmin
+      .from('emergencies')
+      .insert({
+        hospital_name,
+        wilaya_id,
+        zone_id: zone_id ?? null,
+        blood_type,
+        units_needed: units_needed ?? 1,
+        status: 'open',
+      })
+      .select()
+      .single();
 
-      const [action, value] = callbackData.split(':');
-
-      // Wilaya Selection
-      if (action === 'wilaya') {
-        const wilayaId = parseInt(value, 10);
-
-        await supabaseAdmin.from('donors').upsert(
-          { chat_id: chatId, wilaya_id: wilayaId, zone_id: null, is_active: true },
-          { onConflict: 'chat_id' }
-        );
-
-        await answerCallback(callbackId);
-
-        if (wilayaId === 16) {
-          const { data: zones } = await supabaseAdmin
-            .from('zones')
-            .select('*')
-            .eq('wilaya_id', 16);
-
-          const inline_keyboard = (zones || []).map((z) => [
-            { text: `${z.name} (${z.name_ar})`, callback_data: `zone:${z.id}` },
-          ]);
-
-          await sendMsg(chatId, '📍 <b>اختر المنطقة التابعة للجزائر العاصمة:</b>', {
-            inline_keyboard,
-          });
-        } else {
-          await showBloodTypeKeyboard(chatId);
-        }
-      }
-
-      // Zone Selection (Algiers)
-      if (action === 'zone') {
-        const zoneId = parseInt(value, 10);
-
-        await supabaseAdmin.from('donors').upsert(
-          { chat_id: chatId, zone_id: zoneId, is_active: true },
-          { onConflict: 'chat_id' }
-        );
-
-        await answerCallback(callbackId);
-        await showBloodTypeKeyboard(chatId);
-      }
-
-      // Blood Type Selection
-      if (action === 'blood') {
-        const bloodType = value;
-
-        if (BLOOD_TYPES.includes(bloodType)) {
-          await supabaseAdmin.from('donors').upsert(
-            { chat_id: chatId, blood_type: bloodType, is_active: true },
-            { onConflict: 'chat_id' }
-          );
-
-          await answerCallback(callbackId, '✅ تم الحفظ');
-
-          await sendMsg(
-            chatId,
-            `✅ <b>تم تسجيلك بنجاح في منصة تـويـزة!</b>\n\n🩸 <b>فصيلة الدم:</b> <code>${bloodType}</code>\n\nستصلك إشعارات فورية عند وجود حاجة ماسة لدم من فصيلتك في منطقتك. يمكنك تعديل معلوماتك في أي وقت بإرسال /start.`
-          );
-        }
-      }
-
-      // Donor Action: Accept / Pledge
-      if (action === 'pledge') {
-        await answerCallback(callbackId, '❤️ جزاك الله خيراً');
-
-        // Remove buttons and append acceptance badge to the original alert card
-        if (messageId && chatId) {
-          const originalText =
-            update.callback_query.message && 'text' in update.callback_query.message
-              ? (update.callback_query.message as { text?: string }).text || ''
-              : '🚨 <b>نداء استغاثة عاجل</b>';
-
-          await editMessageText(
-            chatId,
-            messageId,
-            `${originalText}\n\n<b>━━━━━━━━━━━━━━━</b>\n✅ <b>تم تأكيد الاستجابة:</b> أنت في طريقك للمساعدة.`
-          );
-        }
-
-        await sendMsg(
-          chatId,
-          '❤️ <b>شكرًا لاستجابتك النبيلة!</b>\n\nيرجى التوجه إلى مصلحة حقن الدم (CTS) بالمستشفى في أقرب وقت. مساهمتك سبب في إنقاذ حياة!'
-        );
-      }
-
-      // Donor Action: Decline
-      if (action === 'decline') {
-        await answerCallback(callbackId, 'شكراً لك، نقدّر وقتك');
-
-        // Remove buttons and append declined badge
-        if (messageId && chatId) {
-          const originalText =
-            update.callback_query.message && 'text' in update.callback_query.message
-              ? (update.callback_query.message as { text?: string }).text || ''
-              : '🚨 <b>نداء استغاثة عاجل</b>';
-
-          await editMessageText(
-            chatId,
-            messageId,
-            `${originalText}\n\n<b>━━━━━━━━━━━━━━━</b>\n❌ <b>تم الاعتذار:</b> نأمل أن تكون معنا في النداء القادم.`
-          );
-        }
-
-        await sendMsg(
-          chatId,
-          '🙏 <b>شكراً لك!</b>\n\nتم تسجيل اعتذارك لهذه الحالة. سنقوم بإشعارك عند وجود نداءات طارئة أخرى.'
-        );
-      }
-
-      return NextResponse.json({ ok: true });
+    if (emergencyError || !emergency) {
+      console.error('Emergency creation failed:', emergencyError);
+      return NextResponse.json({ error: 'Failed to create emergency record' }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true });
-  } catch (error) {
-    console.error('Telegram Webhook error:', error);
-    return NextResponse.json({ ok: true });
+    // 2. Fetch matching active donors
+    let query = supabaseAdmin
+      .from('donors')
+      .select('chat_id')
+      .eq('wilaya_id', wilaya_id)
+      .eq('blood_type', blood_type)
+      .eq('is_active', true);
+
+    if (zone_id) {
+      query = query.eq('zone_id', zone_id);
+    }
+
+    const { data: donors, error: donorsError } = await query;
+
+    if (donorsError) {
+      console.error('Donor query failed:', donorsError);
+      return NextResponse.json({ error: 'Donor query failed' }, { status: 500 });
+    }
+
+    if (!donors || donors.length === 0) {
+      return NextResponse.json({
+        ok: true,
+        notified_count: 0,
+        matched_count: 0,
+        emergency_id: emergency.id,
+      });
+    }
+
+    // 3. Clear, scannable structured layout
+    const units = units_needed ?? 1;
+    const alertText =
+      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n` +
+      `━━━━━━━━━━━━━━━━━━\n\n` +
+      `🏥 <b>المستشفى / Hôpital :</b>\n` +
+      `└ <code>${esc(hospital_name)}</code>\n\n` +
+      `🩸 <b>الفصيلة المطلوبة / Groupe :</b>\n` +
+      `└ <b>[ ${esc(blood_type)} ]</b> — <i>(${units} كيس / poches)</i>\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `هل أنت متاح وقادر على التبرع الآن؟`;
+
+    const keyboard = {
+      inline_keyboard: [
+        [{ text: '✅ أنا مستعد للتبرع (Je peux)', callback_data: `pledge:${emergency.id}` }],
+        [{ text: '❌ لا أستطيع حاليًا (Indisponible)', callback_data: `decline:${emergency.id}` }],
+      ],
+    };
+
+    // 4. Send alerts in parallel
+    const results = await Promise.allSettled(
+      donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
+    );
+
+    const sentCount = results.filter((r) => r.status === 'fulfilled' && r.value === true).length;
+
+    return NextResponse.json({
+      ok: true,
+      notified_count: sentCount,
+      matched_count: donors.length,
+      emergency_id: emergency.id,
+    });
+  } catch (err) {
+    console.error('Dispatch fatal error:', err);
+    return NextResponse.json({ error: 'Internal Error' }, { status: 500 });
   }
 }
