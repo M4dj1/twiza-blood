@@ -44,6 +44,13 @@ async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: o
 export async function POST(req: Request) {
   try {
     const update = await req.json();
+    
+    // DEBUG: Print full update object to Vercel logs
+    console.log('RECEIVED UPDATE:', JSON.stringify(update, null, 2));
+
+    if (update.callback_query) {
+      console.log('CALLBACK DATA:', update.callback_query.data);
+    }
 
     // 1. Handle Direct Commands (/start)
     if (update.message?.text === '/start') {
