@@ -76,9 +76,9 @@ export async function POST(req: NextRequest) {
       const chatId = update.callback_query.message?.chat.id || update.callback_query.from.id;
       const messageId = update.callback_query.message?.message_id;
 
-      const [action, value, extra] = callbackData.split(':');
+      const [action, value] = callbackData.split(':');
 
-      // Step 1: Wilaya Selected -> Edit card in-place
+      // --- Registration: Wilaya ---
       if (action === 'wilaya') {
         const wilayaId = parseInt(value, 10);
 
@@ -108,12 +108,11 @@ export async function POST(req: NextRequest) {
             );
           }
         } else {
-          // Other wilayas jump directly to blood selection on the same message
           await promptBloodType(chatId, messageId);
         }
       }
 
-      // Step 2: Zone Selected -> Edit card in-place to Blood Types
+      // --- Registration: Zone ---
       if (action === 'zone') {
         const zoneId = parseInt(value, 10);
 
@@ -126,7 +125,7 @@ export async function POST(req: NextRequest) {
         await promptBloodType(chatId, messageId);
       }
 
-      // Step 3: Blood Type Selected -> Final In-Place Badge Transformation
+      // --- Registration: Blood Type ---
       if (action === 'blood') {
         const bloodType = value;
 
@@ -138,7 +137,6 @@ export async function POST(req: NextRequest) {
 
           await answerCallback(callbackId, '✅ تم حفظ البيانات');
 
-          // Fetch full profile info to construct the clean badge
           const { data: donor } = await supabaseAdmin
             .from('donors')
             .select('wilayas(name_ar), zones(name_ar)')
@@ -162,24 +160,140 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Dispatch Response: Pledge -> Edit card in-place
+      // --- Dispatch: Pledge (Accept) using ticket_id ---
       if (action === 'pledge') {
-        const hospital = extra ? decodeURIComponent(extra) : 'المستشفى';
+        const ticketId = value;
+
+        // 1. Get donor ID from Supabase
+        const { data: donor } = await supabaseAdmin
+          .from('donors')
+          .select('id')
+          .eq('chat_id', chatId)
+          .single();
+
+        if (!donor) {
+          await answerCallback(callbackId, 'يرجى التسجيل أولاً عبر إرسال /start');
+          return NextResponse.json({ ok: true });
+        }
+
+        // 2. Check Emergency status & capacity
+        const { data: emergency } = await supabaseAdmin
+          .from('emergencies')
+          .select('id, hospital_name, units_needed, pledges_count, status')
+          .eq('id', ticketId)
+          .single();
+
+        if (!emergency || emergency.status === 'fulfilled' || emergency.status === 'closed') {
+          await answerCallback(callbackId, 'تم توفير العدد المطلوب لهذه الحالة');
+          if (messageId && chatId) {
+            await editMessage(
+              chatId,
+              messageId,
+              `ℹ️ <b>اكتمل النداء</b>\n\n` +
+              `تم تغطية الاحتياج وتأكيد متبرعين لهذه الحالة مسبقًا. بارك الله فيك!`
+            );
+          }
+          return NextResponse.json({ ok: true });
+        }
+
+        // 3. Upsert Pledge using ticket_id
+        const { error: pledgeError } = await supabaseAdmin
+          .from('pledges')
+          .upsert(
+            { ticket_id: ticketId, donor_id: donor.id, status: 'committed' },
+            { onConflict: 'ticket_id,donor_id' }
+          );
+
+        if (pledgeError) {
+          console.error('Pledge error:', pledgeError);
+          await answerCallback(callbackId, 'تعذر التسجيل، يرجى المحاولة لاحقاً');
+          return NextResponse.json({ ok: true });
+        }
+
+        // 4. Update Emergency Count
+        const newCount = (emergency.pledges_count || 0) + 1;
+        const isFulfilled = newCount >= emergency.units_needed;
+
+        await supabaseAdmin
+          .from('emergencies')
+          .update({
+            pledges_count: newCount,
+            status: isFulfilled ? 'fulfilled' : 'open',
+          })
+          .eq('id', ticketId);
+
         await answerCallback(callbackId, '❤️ جزاك الله خيراً');
+
+        // Render confirmation card with an active cancel button
+        if (messageId && chatId) {
+          const cancelKeyboard = {
+            inline_keyboard: [
+              [{ text: '⚠️ إلغاء الاستجابة / اعتذار طارئ', callback_data: `cancel_pledge:${ticketId}` }],
+            ],
+          };
+
+          await editMessage(
+            chatId,
+            messageId,
+            `✅ <b>تم تأكيد استجابتك للتبرع</b>\n\n` +
+            `🏥 <b>الوجهة:</b> ${emergency.hospital_name}\n` +
+            `📍 يرجى التوجه إلى مصلحة حقن الدم (CTS).\n\n` +
+            `❤️ <i>إذا طرأ أي مانع يمنعك من الحضور، يرجى الضغط على زر الإلغاء أسفله حتى نتمكن من تنبيه متبرع آخر.</i>`,
+            cancelKeyboard
+          );
+        }
+      }
+
+      // --- Dispatch: Cancel an existing pledge using ticket_id ---
+      if (action === 'cancel_pledge') {
+        const ticketId = value;
+
+        const { data: donor } = await supabaseAdmin
+          .from('donors')
+          .select('id')
+          .eq('chat_id', chatId)
+          .single();
+
+        if (donor) {
+          // 1. Mark pledge as cancelled
+          await supabaseAdmin
+            .from('pledges')
+            .update({ status: 'cancelled' })
+            .eq('ticket_id', ticketId)
+            .eq('donor_id', donor.id);
+
+          // 2. Decrement emergency pledge count and reopen if needed
+          const { data: emergency } = await supabaseAdmin
+            .from('emergencies')
+            .select('pledges_count, status')
+            .eq('id', ticketId)
+            .single();
+
+          if (emergency) {
+            const updatedCount = Math.max(0, (emergency.pledges_count || 1) - 1);
+            await supabaseAdmin
+              .from('emergencies')
+              .update({
+                pledges_count: updatedCount,
+                status: 'open',
+              })
+              .eq('id', ticketId);
+          }
+        }
+
+        await answerCallback(callbackId, 'تم إلغاء الاستجابة');
 
         if (messageId && chatId) {
           await editMessage(
             chatId,
             messageId,
-            `✅ <b>تم تأكيد استجابتك للتبرع</b>\n\n` +
-            `🏥 <b>الوجهة:</b> ${hospital}\n` +
-            `📍 يرجى التوجه إلى مصلحة حقن الدم (CTS).\n\n` +
-            `❤️ <i>بارك الله فيك وجعلها في ميزان حسناتك.</i>`
+            `⚠️ <b>تم إلغاء استجابتك</b>\n\n` +
+            `تم تسجيل اعتذارك وإعادة فتح النداء لمتبرعين آخرين. نأمل مشاركتك معنا في المرات القادمة.`
           );
         }
       }
 
-      // Dispatch Response: Decline -> Edit card in-place
+      // --- Dispatch: Decline ---
       if (action === 'decline') {
         await answerCallback(callbackId, 'شكراً لك');
 
@@ -206,20 +320,20 @@ export async function POST(req: NextRequest) {
 async function promptBloodType(chatId: number, messageId?: number) {
   const keyboard = [
     [
-      { text: 'O+', callback_data: 'blood:O+' },
-      { text: 'O-', callback_data: 'blood:O-' },
+      { text: '🩸 O+', callback_data: 'blood:O+' },
+      { text: '🩸 O-', callback_data: 'blood:O-' },
     ],
     [
-      { text: 'A+', callback_data: 'blood:A+' },
-      { text: 'A-', callback_data: 'blood:A-' },
+      { text: '🩸 A+', callback_data: 'blood:A+' },
+      { text: '🩸 A-', callback_data: 'blood:A-' },
     ],
     [
-      { text: 'B+', callback_data: 'blood:B+' },
-      { text: 'B-', callback_data: 'blood:B-' },
+      { text: '🩸 B+', callback_data: 'blood:B+' },
+      { text: '🩸 B-', callback_data: 'blood:B-' },
     ],
     [
-      { text: 'AB+', callback_data: 'blood:AB+' },
-      { text: 'AB-', callback_data: 'blood:AB-' },
+      { text: '🩸 AB+', callback_data: 'blood:AB+' },
+      { text: '🩸 AB-', callback_data: 'blood:AB-' },
     ],
   ];
 
