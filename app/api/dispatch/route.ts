@@ -25,11 +25,18 @@ async function sendAlert(chatId: number, text: string, keyboard: object): Promis
 
 export async function POST(req: Request) {
   try {
-    if (req.headers.get('authorization') !== `Bearer ${process.env.DISPATCH_SECRET}`) {
+    const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const body = await req.json();
+    const authHeader = req.headers.get('authorization');
+
+    // Auth: original body style (secret_key) OR Bearer header — same key either way.
+    const authorized =
+      authHeader === `Bearer ${SERVICE_KEY}` || body.secret_key === SERVICE_KEY;
+    if (!authorized) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
 
-    const { hospital_name, zone, target_blood_type, units_needed } = await req.json();
+    const { hospital_name, zone, target_blood_type, units_needed } = body;
     if (!hospital_name || !zone || !target_blood_type) {
       return NextResponse.json(
         { error: 'hospital_name, zone and target_blood_type are required' },
@@ -55,11 +62,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Failed to create ticket' }, { status: 500 });
     }
 
-    // 2. Fetch matching donors — error is now checked, not swallowed
+    // 2. Fetch matching donors (error checked — no more silent zeros)
     const { data: donors, error: donorsError } = await supabaseAdmin
       .from('donors')
       .select('telegram_chat_id')
-      .eq('zone', zone)          // NOTE: must be the slug, e.g. "alger_centre"
+      .eq('zone', zone)
       .eq('blood_type', target_blood_type)
       .eq('is_active', true);
 
@@ -69,10 +76,10 @@ export async function POST(req: Request) {
     }
 
     if (!donors || donors.length === 0) {
-      return NextResponse.json({ ok: true, notified_count: 0, ticket_id: ticket.id });
+      return NextResponse.json({ ok: true, notified_count: 0, matched_count: 0, ticket_id: ticket.id });
     }
 
-    // 3. Broadcast in parallel (chunk if you ever exceed Telegram's ~30 msg/s)
+    // 3. Broadcast
     const units = units_needed ?? 1;
     const messageText =
       `🚨 <b>URGENT BLOOD APPEAL</b>\n\n` +
