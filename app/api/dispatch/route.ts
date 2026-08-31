@@ -4,16 +4,24 @@ import { supabaseAdmin } from '@/lib/supabase';
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 async function sendAlert(chatId: number, text: string, keyboard: object) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      reply_markup: keyboard,
-    }),
-  });
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      }),
+    });
+    const data = await res.json();
+    console.log(`Telegram sendMessage result for ${chatId}:`, data);
+    return data;
+  } catch (err) {
+    console.error(`Telegram fetch failed for ${chatId}:`, err);
+    return null;
+  }
 }
 
 export async function POST(req: Request) {
@@ -39,10 +47,11 @@ export async function POST(req: Request) {
       .single();
 
     if (ticketError || !ticket) {
+      console.error('Ticket creation failed:', ticketError);
       return NextResponse.json({ error: 'Failed to create ticket' }, { status: 500 });
     }
 
-    // 2. Fetch Matching Donors (Simplified zone & blood match)
+    // 2. Fetch Matching Donors
     const { data: donors } = await supabaseAdmin
       .from('donors')
       .select('telegram_chat_id')
@@ -68,13 +77,15 @@ export async function POST(req: Request) {
       ],
     };
 
+    let sentCount = 0;
     for (const donor of donors) {
-      await sendAlert(donor.telegram_chat_id, messageText, keyboard);
+      const result = await sendAlert(donor.telegram_chat_id, messageText, keyboard);
+      if (result && result.ok) sentCount++;
     }
 
-    return NextResponse.json({ ok: true, notified_count: donors.length, ticket_id: ticket.id });
+    return NextResponse.json({ ok: true, notified_count: sentCount, ticket_id: ticket.id });
   } catch (err) {
-    console.error('Dispatch error:', err);
+    console.error('Dispatch fatal error:', err);
     return NextResponse.json({ error: 'Internal Error' }, { status: 500 });
   }
 }
