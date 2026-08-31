@@ -45,7 +45,7 @@ export async function POST(req: Request) {
   try {
     const update = await req.json();
 
-    // 1. Handle Direct /start Command
+    // 1. Handle Direct Commands (/start)
     if (update.message?.text === '/start') {
       const chatId = update.message.chat.id;
 
@@ -76,7 +76,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true });
       }
 
-      // 🛑 CRITICAL FIX: Await callback acknowledgment before triggering reply message
+      // Clear Telegram loading spinner
       await answerCallbackQuery(callbackQueryId);
 
       // --- Zone Selection ---
