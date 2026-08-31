@@ -3,6 +3,17 @@ import { supabaseAdmin } from '@/lib/supabase';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
+async function answerCallbackQuery(callbackQueryId: string, text?: string) {
+  await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      callback_query_id: callbackQueryId,
+      text: text || '',
+    }),
+  });
+}
+
 async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: object) {
   await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: 'POST',
@@ -43,80 +54,48 @@ export async function POST(req: Request) {
 
     // Handle Button Callbacks (Zone & Blood Type Selection)
     if (update.callback_query) {
-      const chatId = update.callback_query.message.chat.id;
-      const data = update.callback_query.data;
+    const callbackQueryId = update.callback_query.id;
+    const data = update.callback_query.data;
+    const chatId = update.callback_query.message.chat.id;
 
-      // Stage 1: Zone Selected -> Ask for Blood Type
-      if (data.startsWith('zone:')) {
-        const selectedZone = data.split(':')[1];
-        
-        const bloodKeyboard = {
-          inline_keyboard: [
-            [{ text: 'A+', callback_data: `reg:${selectedZone}:A+` }, { text: 'A-', callback_data: `reg:${selectedZone}:A-` }],
-            [{ text: 'B+', callback_data: `reg:${selectedZone}:B+` }, { text: 'B-', callback_data: `reg:${selectedZone}:B-` }],
-            [{ text: 'AB+', callback_data: `reg:${selectedZone}:AB+` }, { text: 'AB-', callback_data: `reg:${selectedZone}:AB-` }],
-            [{ text: 'O+', callback_data: `reg:${selectedZone}:O+` }, { text: 'O-', callback_data: `reg:${selectedZone}:O-` }],
-          ],
-        };
+    // 1. Instantly acknowledge the button tap to stop the loading spinner
+    await answerCallbackQuery(callbackQueryId);
 
-        await sendTelegramMessage(chatId, `Select your blood type:`, bloodKeyboard);
-      }
-
-      // Stage 2: Save Registration to Supabase
-      if (data.startsWith('reg:')) {
-        const [, zone, bloodType] = data.split(':');
-
-        const { error } = await supabaseAdmin.from('donors').upsert(
-          {
-            telegram_chat_id: chatId,
-            zone,
-            blood_type: bloodType,
-            is_active: true,
-          },
-          { onConflict: 'telegram_chat_id' }
-        );
-
-        if (error) {
-          await sendTelegramMessage(chatId, `⚠️ Registration failed. Please try again with /start.`);
-        } else {
-          await sendTelegramMessage(
-            chatId,
-            `✅ *Registration Complete!*\n\n• Zone: *${zone}*\n• Blood Type: *${bloodType}*\n\nYou will now receive targeted alerts when a matching hospital emergency occurs in your area.`
-          );
-        }
-      }
-
-      // Stage 3: Donor Accepts Emergency Alert (Pledge)
-        if (data.startsWith('pledge:')) {
+    // Stage 3a: Donor Accepts Emergency Alert (Pledge)
+    if (data.startsWith('pledge:')) {
         const ticketId = data.split(':')[1];
 
-        // 1. Fetch donor ID
         const { data: donor } = await supabaseAdmin
-            .from('donors')
-            .select('id')
-            .eq('telegram_chat_id', chatId)
-            .single();
+        .from('donors')
+        .select('id')
+        .eq('telegram_chat_id', chatId)
+        .single();
 
         if (donor) {
-            // 2. Insert Pledge Commitment
-            const { error: pledgeError } = await supabaseAdmin.from('pledges').insert({
+        const { error: pledgeError } = await supabaseAdmin.from('pledges').insert({
             ticket_id: ticketId,
             donor_id: donor.id,
             status: 'committed',
-            });
+        });
 
-            if (pledgeError) {
+        if (pledgeError) {
             await sendTelegramMessage(chatId, `⚠️ You have already responded or this emergency slot is full.`);
-            } else {
+        } else {
             await sendTelegramMessage(
-                chatId,
-                `❤️ *Barak Allahu Feek! / شكراً لجهودك*\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.\n\n_Note: You will receive a automated check-in in 45 minutes to confirm arrival._`
+            chatId,
+            `❤️ <b>Barak Allahu Feek! / شكراً لجهودك</b>\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.\n\n<i>Note: You will receive an automated check-in in 45 minutes to confirm arrival.</i>`
             );
-            }
         }
         }
+    }
 
-      return NextResponse.json({ ok: true });
+    // Stage 3b: Donor Declines Emergency Alert
+    if (data.startsWith('decline:')) {
+        await sendTelegramMessage(
+        chatId,
+        `🤝 Thank you for letting us know! We will keep you available for future urgent appeals.`
+        );
+    }
     }
 
     return NextResponse.json({ ok: true });
