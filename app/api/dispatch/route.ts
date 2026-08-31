@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
@@ -7,15 +7,19 @@ function esc(s = '') {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-async function sendAlert(chatId: number, text: string, keyboard: object): Promise<boolean> {
+async function sendTelegramAlert(chatId: number, text: string, keyboard: object): Promise<boolean> {
   try {
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', reply_markup: keyboard }),
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: keyboard,
+      }),
     });
     const data = await res.json().catch(() => null);
-    if (!data?.ok) console.error(`Telegram sendMessage failed for ${chatId}:`, data);
     return data?.ok === true;
   } catch (err) {
     console.error(`Telegram fetch failed for ${chatId}:`, err);
@@ -23,52 +27,50 @@ async function sendAlert(chatId: number, text: string, keyboard: object): Promis
   }
 }
 
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
   try {
-    const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
     const body = await req.json();
-    const authHeader = req.headers.get('authorization');
+    const { hospital_name, wilaya_id, zone_id, blood_type, units_needed } = body;
 
-    // Auth: original body style (secret_key) OR Bearer header — same key either way.
-    const authorized =
-      authHeader === `Bearer ${SERVICE_KEY}` || body.secret_key === SERVICE_KEY;
-    if (!authorized) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const { hospital_name, zone, target_blood_type, units_needed } = body;
-    if (!hospital_name || !zone || !target_blood_type) {
+    if (!hospital_name || !wilaya_id || !blood_type) {
       return NextResponse.json(
-        { error: 'hospital_name, zone and target_blood_type are required' },
+        { error: 'hospital_name, wilaya_id, and blood_type are required' },
         { status: 400 }
       );
     }
 
     // 1. Create emergency ticket
-    const { data: ticket, error: ticketError } = await supabaseAdmin
-      .from('emergency_tickets')
+    const { data: emergency, error: emergencyError } = await supabaseAdmin
+      .from('emergencies')
       .insert({
         hospital_name,
-        zone,
-        target_blood_type,
+        wilaya_id,
+        zone_id: zone_id ?? null,
+        blood_type,
         units_needed: units_needed ?? 1,
         status: 'open',
       })
       .select()
       .single();
 
-    if (ticketError || !ticket) {
-      console.error('Ticket creation failed:', ticketError);
-      return NextResponse.json({ error: 'Failed to create ticket' }, { status: 500 });
+    if (emergencyError || !emergency) {
+      console.error('Emergency creation failed:', emergencyError);
+      return NextResponse.json({ error: 'Failed to create emergency record' }, { status: 500 });
     }
 
-    // 2. Fetch matching donors (error checked — no more silent zeros)
-    const { data: donors, error: donorsError } = await supabaseAdmin
+    // 2. Fetch matching active donors
+    let query = supabaseAdmin
       .from('donors')
-      .select('telegram_chat_id')
-      .eq('zone', zone)
-      .eq('blood_type', target_blood_type)
+      .select('chat_id')
+      .eq('wilaya_id', wilaya_id)
+      .eq('blood_type', blood_type)
       .eq('is_active', true);
+
+    if (zone_id) {
+      query = query.eq('zone_id', zone_id);
+    }
+
+    const { data: donors, error: donorsError } = await query;
 
     if (donorsError) {
       console.error('Donor query failed:', donorsError);
@@ -76,35 +78,41 @@ export async function POST(req: Request) {
     }
 
     if (!donors || donors.length === 0) {
-      return NextResponse.json({ ok: true, notified_count: 0, matched_count: 0, ticket_id: ticket.id });
+      return NextResponse.json({
+        ok: true,
+        notified_count: 0,
+        matched_count: 0,
+        emergency_id: emergency.id,
+      });
     }
 
-    // 3. Broadcast
+    // 3. Prepare bilingual alert message
     const units = units_needed ?? 1;
-    const messageText =
-      `🚨 <b>URGENT BLOOD APPEAL</b>\n\n` +
-      `🏥 <b>Hospital:</b> ${esc(hospital_name)}\n` +
-      `🩸 <b>Blood Required:</b> ${esc(target_blood_type)} (${units} unit${units > 1 ? 's' : ''})\n` +
-      `📍 <b>Zone:</b> ${esc(zone)}\n\n` +
-      `Can you donate now?`;
+    const alertText =
+      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم | ALERTE URGENCE</b>\n\n` +
+      `🏥 <b>المستشفى / Hôpital:</b> ${esc(hospital_name)}\n` +
+      `🩸 <b>فصيلة الدم المطلوبة / Groupe:</b> <code>${esc(blood_type)}</code> (${units} كيس/poche)\n\n` +
+      `هل يمكنك التبرع الآن والمساعدة في إنقاذ حياة؟`;
 
     const keyboard = {
       inline_keyboard: [
-        [{ text: '✅ I Can Donate', callback_data: `pledge:${ticket.id}` }],
-        [{ text: '❌ Cannot Right Now', callback_data: `decline:${ticket.id}` }],
+        [{ text: '✅ أنا مستعد للتبرع (Je peux)', callback_data: `pledge:${emergency.id}` }],
+        [{ text: '❌ لا أستطيع حاليًا (Indisponible)', callback_data: `decline:${emergency.id}` }],
       ],
     };
 
+    // 4. Send alerts to all matching donors in parallel
     const results = await Promise.allSettled(
-      donors.map((d) => sendAlert(d.telegram_chat_id, messageText, keyboard))
+      donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
     );
+
     const sentCount = results.filter((r) => r.status === 'fulfilled' && r.value === true).length;
 
     return NextResponse.json({
       ok: true,
       notified_count: sentCount,
       matched_count: donors.length,
-      ticket_id: ticket.id,
+      emergency_id: emergency.id,
     });
   } catch (err) {
     console.error('Dispatch fatal error:', err);
