@@ -4,70 +4,86 @@ import { supabaseAdmin } from '@/lib/supabase';
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
 async function answerCallbackQuery(callbackQueryId: string, text?: string) {
-  const res = await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      callback_query_id: callbackQueryId,
-      text: text || '',
-    }),
-  });
-  return res.json();
+  try {
+    const res = await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        callback_query_id: callbackQueryId,
+        text: text || '',
+      }),
+    });
+    return await res.json();
+  } catch (e) {
+    console.error('Failed to answer callback query:', e);
+  }
 }
 
 async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: object) {
-  const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: 'HTML',
-      reply_markup: replyMarkup,
-    }),
-  });
-  const data = await res.json();
-  if (!data.ok) {
-    console.error(`Telegram Send Message Error (chat: ${chatId}):`, data);
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: 'HTML',
+        reply_markup: replyMarkup,
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error(`Telegram Delivery Failed for ${chatId}:`, data);
+    }
+    return data;
+  } catch (e) {
+    console.error('sendTelegramMessage network error:', e);
   }
-  return data;
 }
 
 export async function POST(req: Request) {
   try {
     const update = await req.json();
 
-    // 1. Handle /start Command
-    if (update.message?.text === '/start') {
-      const chatId = update.message.chat.id;
+    // 1. Handle Direct Messages (like /start)
+    if (update.message) {
+      const chatId = update.message.chat?.id;
+      const text = update.message.text;
 
-      const keyboard = {
-        inline_keyboard: [
-          [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
-          [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
-          [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
-        ],
-      };
+      if (!chatId) return NextResponse.json({ ok: true });
 
-      await sendTelegramMessage(
-        chatId,
-        `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
-        keyboard
-      );
+      if (text === '/start') {
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
+            [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
+            [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
+          ],
+        };
 
+        await sendTelegramMessage(
+          chatId,
+          `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
+          keyboard
+        );
+      }
       return NextResponse.json({ ok: true });
     }
 
-    // 2. Handle Button Callbacks
+    // 2. Handle Button Callbacks (Inline Keyboards)
     if (update.callback_query) {
       const callbackQueryId = update.callback_query.id;
-      const data = update.callback_query.data;
-      const chatId = update.callback_query.message.chat.id;
+      const data = update.callback_query.data || '';
+      const chatId = update.callback_query.message?.chat?.id;
 
-      // Instantly acknowledge the button tap to stop the loading spinner
+      if (!chatId || !callbackQueryId) {
+        return NextResponse.json({ ok: true });
+      }
+
+      // Acknowledge tap immediately to clear Telegram loading state
       await answerCallbackQuery(callbackQueryId);
 
-      // --- Registration Flow: Zone Selection ---
+      // --- Zone Selection ---
       if (data.startsWith('zone:')) {
         const zone = data.split(':')[1];
 
@@ -98,7 +114,7 @@ export async function POST(req: Request) {
         );
       }
 
-      // --- Registration Flow: Blood Type Selection ---
+      // --- Blood Type Selection ---
       if (data.startsWith('blood:')) {
         const bloodType = data.split(':')[1];
 
@@ -116,7 +132,7 @@ export async function POST(req: Request) {
         );
       }
 
-      // --- Dispatch Flow: Donor Accepts Emergency Alert (Pledge) ---
+      // --- Emergency Alert Pledge ---
       if (data.startsWith('pledge:')) {
         const ticketId = data.split(':')[1];
 
@@ -141,13 +157,13 @@ export async function POST(req: Request) {
           } else {
             await sendTelegramMessage(
               chatId,
-              `❤️ <b>Barak Allahu Feek! / شكراً لجهودك</b>\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.\n\n<i>Note: You will receive an automated check-in in 45 minutes to confirm arrival.</i>`
+              `❤️ <b>Barak Allahu Feek! / شكراً لجهودك</b>\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.`
             );
           }
         }
       }
 
-      // --- Dispatch Flow: Donor Declines Emergency Alert ---
+      // --- Emergency Alert Decline ---
       if (data.startsWith('decline:')) {
         await sendTelegramMessage(
           chatId,
@@ -155,38 +171,12 @@ export async function POST(req: Request) {
         );
       }
 
-      // --- Cron Check-In: Arrival Confirmation ---
-      if (data.startsWith('arrived:')) {
-        const pledgeId = data.split(':')[1];
-        await supabaseAdmin
-          .from('pledges')
-          .update({ status: 'arrived' })
-          .eq('id', pledgeId);
-
-        await sendTelegramMessage(
-          chatId,
-          `🏥 <b>Arrival Confirmed!</b>\n\nThank you for reaching the Transfusion Center. May your donation save a life today!`
-        );
-      }
-
-      // --- Cron Check-In: Delayed Response ---
-      if (data.startsWith('delayed:')) {
-        const pledgeId = data.split(':')[1];
-        await supabaseAdmin
-          .from('pledges')
-          .update({ status: 'delayed' })
-          .eq('id', pledgeId);
-
-        await sendTelegramMessage(
-          chatId,
-          `🚗 <b>Understood!</b>\n\nWe reserved your slot for 15 additional minutes. Drive safely!`
-        );
-      }
+      return NextResponse.json({ ok: true });
     }
 
     return NextResponse.json({ ok: true });
   } catch (err) {
-    console.error('Webhook error:', err);
-    return NextResponse.json({ error: 'Internal Error' }, { status: 500 });
+    console.error('Fatal Webhook Error:', err);
+    return NextResponse.json({ error: 'Internal Server Error' }, { status: 500 });
   }
 }
