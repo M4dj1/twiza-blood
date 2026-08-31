@@ -13,7 +13,9 @@ async function answerCallbackQuery(callbackQueryId: string, text?: string) {
         text: text || '',
       }),
     });
-    return await res.json();
+    const data = await res.json();
+    console.log('answerCallbackQuery response:', data);
+    return data;
   } catch (e) {
     console.error('Failed to answer callback query:', e);
   }
@@ -21,6 +23,7 @@ async function answerCallbackQuery(callbackQueryId: string, text?: string) {
 
 async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: object) {
   try {
+    console.log(`Sending message to chatId ${chatId}...`);
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -32,9 +35,7 @@ async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: o
       }),
     });
     const data = await res.json();
-    if (!data.ok) {
-      console.error(`Telegram Delivery Failed for ${chatId}:`, data);
-    }
+    console.log(`sendMessage result for ${chatId}:`, data);
     return data;
   } catch (e) {
     console.error('sendTelegramMessage network error:', e);
@@ -44,50 +45,53 @@ async function sendTelegramMessage(chatId: number, text: string, replyMarkup?: o
 export async function POST(req: Request) {
   try {
     const update = await req.json();
+    console.log('--- NEW INCOMING WEBHOOK UPDATE ---');
+    console.log(JSON.stringify(update, null, 2));
 
-    // 1. Handle Direct Messages (like /start)
-    if (update.message) {
-      const chatId = update.message.chat?.id;
-      const text = update.message.text;
+    // 1. Handle Direct Commands (/start)
+    if (update.message?.text === '/start') {
+      const chatId = update.message.chat.id;
 
-      if (!chatId) return NextResponse.json({ ok: true });
+      const keyboard = {
+        inline_keyboard: [
+          [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
+          [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
+          [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
+        ],
+      };
 
-      if (text === '/start') {
-        const keyboard = {
-          inline_keyboard: [
-            [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
-            [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
-            [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
-          ],
-        };
+      await sendTelegramMessage(
+        chatId,
+        `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
+        keyboard
+      );
 
-        await sendTelegramMessage(
-          chatId,
-          `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
-          keyboard
-        );
-      }
       return NextResponse.json({ ok: true });
     }
 
-    // 2. Handle Button Callbacks (Inline Keyboards)
+    // 2. Handle Inline Button Callbacks
     if (update.callback_query) {
       const callbackQueryId = update.callback_query.id;
       const data = update.callback_query.data || '';
-      const chatId = update.callback_query.message?.chat?.id;
+      
+      // Get chat ID from message OR from the user who tapped the button
+      const chatId = update.callback_query.message?.chat?.id || update.callback_query.from?.id;
+
+      console.log(`Callback query detected. ID: ${callbackQueryId}, Data: "${data}", ChatID: ${chatId}`);
 
       if (!chatId || !callbackQueryId) {
+        console.error('Missing chatId or callbackQueryId in update payload');
         return NextResponse.json({ ok: true });
       }
 
-      // Acknowledge tap immediately to clear Telegram loading state
+      // Acknowledge the callback immediately
       await answerCallbackQuery(callbackQueryId);
 
       // --- Zone Selection ---
       if (data.startsWith('zone:')) {
         const zone = data.split(':')[1];
 
-        await supabaseAdmin.from('donors').upsert(
+        const { error: upsertErr } = await supabaseAdmin.from('donors').upsert(
           {
             telegram_chat_id: chatId,
             zone: zone,
@@ -97,6 +101,8 @@ export async function POST(req: Request) {
           },
           { onConflict: 'telegram_chat_id' }
         );
+
+        if (upsertErr) console.error('Supabase zone error:', upsertErr);
 
         const bloodKeyboard = {
           inline_keyboard: [
@@ -118,13 +124,15 @@ export async function POST(req: Request) {
       if (data.startsWith('blood:')) {
         const bloodType = data.split(':')[1];
 
-        await supabaseAdmin
+        const { error: updateErr } = await supabaseAdmin
           .from('donors')
           .update({
             blood_type: bloodType,
             updated_at: new Date().toISOString(),
           })
           .eq('telegram_chat_id', chatId);
+
+        if (updateErr) console.error('Supabase blood error:', updateErr);
 
         await sendTelegramMessage(
           chatId,
@@ -136,11 +144,13 @@ export async function POST(req: Request) {
       if (data.startsWith('pledge:')) {
         const ticketId = data.split(':')[1];
 
-        const { data: donor } = await supabaseAdmin
+        const { data: donor, error: donorFetchErr } = await supabaseAdmin
           .from('donors')
           .select('id')
           .eq('telegram_chat_id', chatId)
           .single();
+
+        if (donorFetchErr) console.error('Donor lookup error:', donorFetchErr);
 
         if (donor) {
           const { error: pledgeError } = await supabaseAdmin.from('pledges').insert({
@@ -150,6 +160,7 @@ export async function POST(req: Request) {
           });
 
           if (pledgeError) {
+            console.error('Pledge insert error:', pledgeError);
             await sendTelegramMessage(
               chatId,
               `⚠️ You have already responded or this emergency slot is full.`
@@ -160,11 +171,17 @@ export async function POST(req: Request) {
               `❤️ <b>Barak Allahu Feek! / شكراً لجهودك</b>\n\nYour commitment has been recorded. Please proceed to the Transfusion Center (CTS) at the hospital.`
             );
           }
+        } else {
+          await sendTelegramMessage(
+            chatId,
+            `⚠️ Please send /start to complete your donor registration first.`
+          );
         }
       }
 
       // --- Emergency Alert Decline ---
       if (data.startsWith('decline:')) {
+        console.log(`Processing decline action for chatId: ${chatId}`);
         await sendTelegramMessage(
           chatId,
           `🤝 Thank you for letting us know! We will keep you available for future urgent appeals.`
