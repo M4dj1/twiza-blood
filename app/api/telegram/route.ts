@@ -34,6 +34,16 @@ const answerCallback = (callbackQueryId: string, text?: string) =>
     text,
   });
 
+// Helper to remove buttons and append the final response status
+const editMessageText = (chatId: number, messageId: number, text: string) =>
+  sendTelegram('editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    reply_markup: { inline_keyboard: [] }, // Clears buttons
+  });
+
 async function showBloodTypeKeyboard(chatId: number) {
   const keyboard = [
     [
@@ -90,6 +100,7 @@ export async function POST(req: NextRequest) {
       const callbackId = update.callback_query.id;
       const callbackData = update.callback_query.data || '';
       const chatId = update.callback_query.message?.chat.id || update.callback_query.from.id;
+      const messageId = update.callback_query.message?.message_id;
 
       const [action, value] = callbackData.split(':');
 
@@ -154,18 +165,52 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // Donor Response: Pledge
+      // Donor Action: Accept / Pledge
       if (action === 'pledge') {
         await answerCallback(callbackId, '❤️ جزاك الله خيراً');
+
+        // Remove buttons and append acceptance badge to the original alert card
+        if (messageId && chatId) {
+          const originalText =
+            update.callback_query.message && 'text' in update.callback_query.message
+              ? (update.callback_query.message as { text?: string }).text || ''
+              : '🚨 <b>نداء استغاثة عاجل</b>';
+
+          await editMessageText(
+            chatId,
+            messageId,
+            `${originalText}\n\n<b>━━━━━━━━━━━━━━━</b>\n✅ <b>تم تأكيد الاستجابة:</b> أنت في طريقك للمساعدة.`
+          );
+        }
+
         await sendMsg(
           chatId,
-          '❤️ <b>شكرًا لاستجابتك السريعة!</b>\n\nيرجى التوجه إلى مصلحة حقن الدم بالمستشفى المذكور في أقرب وقت. مساهمتك تنقذ حياة!'
+          '❤️ <b>شكرًا لاستجابتك النبيلة!</b>\n\nيرجى التوجه إلى مصلحة حقن الدم (CTS) بالمستشفى في أقرب وقت. مساهمتك سبب في إنقاذ حياة!'
         );
       }
 
-      // Donor Response: Decline
+      // Donor Action: Decline
       if (action === 'decline') {
-        await answerCallback(callbackId, 'شكراً لك، نأمل مشاركتك في المرة القادمة');
+        await answerCallback(callbackId, 'شكراً لك، نقدّر وقتك');
+
+        // Remove buttons and append declined badge
+        if (messageId && chatId) {
+          const originalText =
+            update.callback_query.message && 'text' in update.callback_query.message
+              ? (update.callback_query.message as { text?: string }).text || ''
+              : '🚨 <b>نداء استغاثة عاجل</b>';
+
+          await editMessageText(
+            chatId,
+            messageId,
+            `${originalText}\n\n<b>━━━━━━━━━━━━━━━</b>\n❌ <b>تم الاعتذار:</b> نأمل أن تكون معنا في النداء القادم.`
+          );
+        }
+
+        await sendMsg(
+          chatId,
+          '🙏 <b>شكراً لك!</b>\n\nتم تسجيل اعتذارك لهذه الحالة. سنقوم بإشعارك عند وجود نداءات طارئة أخرى.'
+        );
       }
 
       return NextResponse.json({ ok: true });
