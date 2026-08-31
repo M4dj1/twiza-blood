@@ -21,7 +21,7 @@ async function sendTelegramAlert(chatId: number, text: string, replyMarkup: obje
     body: JSON.stringify({
       chat_id: chatId,
       text,
-      parse_mode: 'HTML', // HTML is far less prone to parsing failures than Markdown
+      parse_mode: 'HTML',
       reply_markup: replyMarkup,
     }),
   });
@@ -46,6 +46,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
+    // 1. Create Emergency Ticket
     const { data: ticket, error: ticketError } = await supabaseAdmin
       .from('emergency_tickets')
       .insert({
@@ -63,6 +64,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Failed to create emergency ticket' }, { status: 500 });
     }
 
+    // 2. Query Donors
     const compatibleTypes = COMPATIBILITY_MAP[target_blood_type] || [target_blood_type];
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
@@ -74,10 +76,15 @@ export async function POST(req: Request) {
       .in('blood_type', compatibleTypes)
       .or(`last_donated_at.is.null,last_donated_at.lte.${ninetyDaysAgo}`);
 
-    if (donorError || !donors || donors.length === 0) {
+    if (donorError) {
+      console.error('Donor fetch error:', donorError);
+      return NextResponse.json({ error: 'Failed to fetch donors' }, { status: 500 });
+    }
+
+    if (!donors || donors.length === 0) {
       return NextResponse.json({
         ok: true,
-        message: 'Ticket created, but no matching donors found.',
+        message: 'Ticket created, but no matching donors found in system.',
         ticket_id: ticket.id,
         notified_count: 0,
       });
