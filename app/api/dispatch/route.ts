@@ -64,7 +64,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Failed to create emergency ticket' }, { status: 500 });
     }
 
-    // 2. Query Donors
+    // 2. Query Eligible Donors
     const compatibleTypes = COMPATIBILITY_MAP[target_blood_type] || [target_blood_type];
     const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 

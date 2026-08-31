@@ -45,28 +45,32 @@ export async function POST(req: Request) {
   try {
     const update = await req.json();
 
-    // 1. Handle Direct /start Command
-    if (update.message?.text === '/start') {
-      const chatId = update.message.chat.id;
+    // 1. Handle Direct Messages (like /start)
+    if (update.message) {
+      const chatId = update.message.chat?.id;
+      const text = update.message.text;
 
-      const keyboard = {
-        inline_keyboard: [
-          [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
-          [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
-          [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
-        ],
-      };
+      if (!chatId) return NextResponse.json({ ok: true });
 
-      await sendTelegramMessage(
-        chatId,
-        `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
-        keyboard
-      );
+      if (text === '/start') {
+        const keyboard = {
+          inline_keyboard: [
+            [{ text: 'Alger Centre (Mustapha, Bab El Oued)', callback_data: 'zone:alger_centre' }],
+            [{ text: 'Alger Ouest (Béni Messous, Douera, Zéralda)', callback_data: 'zone:alger_ouest' }],
+            [{ text: 'Alger Est & Sud (Hussein Dey, Kouba, Rouïba)', callback_data: 'zone:alger_est_sud' }],
+          ],
+        };
 
+        await sendTelegramMessage(
+          chatId,
+          `<b>مرحباً بك في تـويـزة | Welcome to Twiza Blood</b>\n\nTo receive emergency donation alerts near you, please select your primary zone in Algiers:`,
+          keyboard
+        );
+      }
       return NextResponse.json({ ok: true });
     }
 
-    // 2. Handle Inline Button Callbacks
+    // 2. Handle Button Callbacks (Inline Keyboards)
     if (update.callback_query) {
       const callbackQueryId = update.callback_query.id;
       const data = update.callback_query.data || '';
@@ -76,7 +80,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ ok: true });
       }
 
-      // 🛑 CRITICAL FIX: Await callback acknowledgment before triggering reply message
+      // Acknowledge tap immediately to clear Telegram loading state
       await answerCallbackQuery(callbackQueryId);
 
       // --- Zone Selection ---
