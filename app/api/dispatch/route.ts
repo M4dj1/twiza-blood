@@ -48,6 +48,7 @@ export async function POST(req: NextRequest) {
         zone_id: zone_id ?? null,
         blood_type,
         units_needed: units_needed ?? 1,
+        pledges_count: 0,
         status: 'open',
       })
       .select()
@@ -86,7 +87,7 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Clean, scannable alert card
+    // 3. Compact Alert Card
     const units = units_needed ?? 1;
     const alertText =
       `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n\n` +
@@ -98,13 +99,13 @@ export async function POST(req: NextRequest) {
     const keyboard = {
       inline_keyboard: [
         [
-          { text: '✅ أنا مستعد للتبرع', callback_data: `pledge:${emergency.id}:${encodeURIComponent(hospital_name)}` },
+          { text: '✅ أنا مستعد للتبرع', callback_data: `pledge:${emergency.id}` },
           { text: '❌ غير متاح الآن', callback_data: `decline:${emergency.id}` },
         ],
       ],
     };
 
-    // 4. Send alerts
+    // 4. Dispatch
     const results = await Promise.allSettled(
       donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
     );

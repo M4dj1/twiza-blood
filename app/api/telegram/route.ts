@@ -160,11 +160,10 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // --- Dispatch: Pledge (Accept) using ticket_id ---
+      // --- Dispatch: Pledge (Accept) ---
       if (action === 'pledge') {
         const ticketId = value;
 
-        // 1. Get donor ID from Supabase
         const { data: donor } = await supabaseAdmin
           .from('donors')
           .select('id')
@@ -176,7 +175,6 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
 
-        // 2. Check Emergency status & capacity
         const { data: emergency } = await supabaseAdmin
           .from('emergencies')
           .select('id, hospital_name, units_needed, pledges_count, status')
@@ -196,21 +194,14 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ ok: true });
         }
 
-        // 3. Upsert Pledge using ticket_id
-        const { error: pledgeError } = await supabaseAdmin
+        // Upsert pledge
+        await supabaseAdmin
           .from('pledges')
           .upsert(
             { ticket_id: ticketId, donor_id: donor.id, status: 'committed' },
             { onConflict: 'ticket_id,donor_id' }
           );
 
-        if (pledgeError) {
-          console.error('Pledge error:', pledgeError);
-          await answerCallback(callbackId, 'تعذر التسجيل، يرجى المحاولة لاحقاً');
-          return NextResponse.json({ ok: true });
-        }
-
-        // 4. Update Emergency Count
         const newCount = (emergency.pledges_count || 0) + 1;
         const isFulfilled = newCount >= emergency.units_needed;
 
@@ -224,7 +215,7 @@ export async function POST(req: NextRequest) {
 
         await answerCallback(callbackId, '❤️ جزاك الله خيراً');
 
-        // Render confirmation card with an active cancel button
+        // Render card with the cancellation button
         if (messageId && chatId) {
           const cancelKeyboard = {
             inline_keyboard: [
@@ -244,7 +235,7 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      // --- Dispatch: Cancel an existing pledge using ticket_id ---
+      // --- Dispatch: Cancel an existing pledge ---
       if (action === 'cancel_pledge') {
         const ticketId = value;
 
@@ -255,17 +246,15 @@ export async function POST(req: NextRequest) {
           .single();
 
         if (donor) {
-          // 1. Mark pledge as cancelled
           await supabaseAdmin
             .from('pledges')
             .update({ status: 'cancelled' })
             .eq('ticket_id', ticketId)
             .eq('donor_id', donor.id);
 
-          // 2. Decrement emergency pledge count and reopen if needed
           const { data: emergency } = await supabaseAdmin
             .from('emergencies')
-            .select('pledges_count, status')
+            .select('pledges_count')
             .eq('id', ticketId)
             .single();
 
