@@ -74,14 +74,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to create emergency record' }, { status: 500 });
     }
 
-    // 2. Fetch Donors - Stage 1: Try Specific Zone with Blood Compatibility
-    let donors: { chat_id: number }[] = [];
+    // 2. Fetch Donors - Include blood_type so we can tailor the message per donor
+    let donors: { chat_id: number; blood_type: string }[] = [];
     let dispatchScope = 'zone';
 
     if (zone_id) {
       const { data: zoneDonors, error: zoneError } = await supabaseAdmin
         .from('donors')
-        .select('chat_id')
+        .select('chat_id, blood_type')
         .eq('wilaya_id', wilaya_id)
         .eq('zone_id', zone_id)
         .in('blood_type', compatibleBloodTypes)
@@ -92,13 +92,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Stage 2: Geographic Fallback
-    // If no zone was supplied OR zone yielded fewer than (units * 3) donors, expand to entire Wilaya
+    // Stage 2: Geographic Fallback if local pool is small
     const MIN_DONOR_POOL = units * 3;
     if (donors.length < MIN_DONOR_POOL) {
       const { data: wilayaDonors, error: wilayaError } = await supabaseAdmin
         .from('donors')
-        .select('chat_id')
+        .select('chat_id, blood_type')
         .eq('wilaya_id', wilaya_id)
         .in('blood_type', compatibleBloodTypes)
         .eq('is_active', true);
@@ -119,14 +118,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Compact Alert Card
-    const alertText =
-      `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n\n` +
-      `🏥 <b>المستشفى:</b> ${esc(hospital_name)}\n` +
-      `🩸 <b>الفصيلة المطلوبة:</b> <b>${esc(blood_type)}</b>\n` +
-      `📦 <b>الاحتياج:</b> ${units} أكياس\n\n` +
-      `هل أنت متاح وقادر على التبرع الآن؟`;
-
     const keyboard = {
       inline_keyboard: [
         [
@@ -136,9 +127,29 @@ export async function POST(req: NextRequest) {
       ],
     };
 
-    // 4. Send alerts in parallel
+    // 3. Dispatch Personalized Messages (Exact vs Compatible)
     const results = await Promise.allSettled(
-      donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
+      donors.map((donor) => {
+        const isExactMatch = donor.blood_type === blood_type;
+
+        let bloodInfoText = '';
+        if (isExactMatch) {
+          bloodInfoText = `🩸 <b>الفصيلة المطلوبة:</b> <b>${esc(blood_type)}</b> (تطابق تام مع فصيلتك)\n`;
+        } else {
+          bloodInfoText =
+            `🩸 <b>فصيلة المريض:</b> <b>${esc(blood_type)}</b>\n` +
+            `💡 <b>تنبيه طبي:</b> فصيلتك (<b>${esc(donor.blood_type)}</b>) متوافقة تمامًا ويمكنها إنقاذ هذا المريض!\n`;
+        }
+
+        const alertText =
+          `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n\n` +
+          `🏥 <b>المستشفى:</b> ${esc(hospital_name)}\n` +
+          `${bloodInfoText}` +
+          `📦 <b>الاحتياج:</b> ${units} أكياس\n\n` +
+          `هل أنت متاح وقادر على التبرع الآن؟`;
+
+        return sendTelegramAlert(donor.chat_id, alertText, keyboard);
+      })
     );
 
     const sentCount = results.filter((r) => r.status === 'fulfilled' && r.value === true).length;
