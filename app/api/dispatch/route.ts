@@ -3,6 +3,18 @@ import { supabaseAdmin } from '@/lib/supabase';
 
 const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
+// Medical RBC Compatibility Map: Target Blood Type -> Compatible Donor Blood Types
+const COMPATIBLE_DONORS_MAP: Record<string, string[]> = {
+  'O-': ['O-'],
+  'O+': ['O+', 'O-'],
+  'A-': ['A-', 'O-'],
+  'A+': ['A+', 'A-', 'O+', 'O-'],
+  'B-': ['B-', 'O-'],
+  'B+': ['B+', 'B-', 'O+', 'O-'],
+  'AB-': ['AB-', 'A-', 'B-', 'O-'],
+  'AB+': ['AB+', 'AB-', 'A+', 'A-', 'B+', 'B-', 'O+', 'O-'],
+};
+
 function esc(s = '') {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -39,6 +51,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const units = units_needed ?? 1;
+    const compatibleBloodTypes = COMPATIBLE_DONORS_MAP[blood_type] || [blood_type];
+
     // 1. Create emergency ticket
     const { data: emergency, error: emergencyError } = await supabaseAdmin
       .from('emergencies')
@@ -47,7 +62,7 @@ export async function POST(req: NextRequest) {
         wilaya_id,
         zone_id: zone_id ?? null,
         blood_type,
-        units_needed: units_needed ?? 1,
+        units_needed: units,
         pledges_count: 0,
         status: 'open',
       })
@@ -59,23 +74,39 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to create emergency record' }, { status: 500 });
     }
 
-    // 2. Fetch matching active donors
-    let query = supabaseAdmin
-      .from('donors')
-      .select('chat_id')
-      .eq('wilaya_id', wilaya_id)
-      .eq('blood_type', blood_type)
-      .eq('is_active', true);
+    // 2. Fetch Donors - Stage 1: Try Specific Zone with Blood Compatibility
+    let donors: { chat_id: number }[] = [];
+    let dispatchScope = 'zone';
 
     if (zone_id) {
-      query = query.eq('zone_id', zone_id);
+      const { data: zoneDonors, error: zoneError } = await supabaseAdmin
+        .from('donors')
+        .select('chat_id')
+        .eq('wilaya_id', wilaya_id)
+        .eq('zone_id', zone_id)
+        .in('blood_type', compatibleBloodTypes)
+        .eq('is_active', true);
+
+      if (!zoneError && zoneDonors) {
+        donors = zoneDonors;
+      }
     }
 
-    const { data: donors, error: donorsError } = await query;
+    // Stage 2: Geographic Fallback
+    // If no zone was supplied OR zone yielded fewer than (units * 3) donors, expand to entire Wilaya
+    const MIN_DONOR_POOL = units * 3;
+    if (donors.length < MIN_DONOR_POOL) {
+      const { data: wilayaDonors, error: wilayaError } = await supabaseAdmin
+        .from('donors')
+        .select('chat_id')
+        .eq('wilaya_id', wilaya_id)
+        .in('blood_type', compatibleBloodTypes)
+        .eq('is_active', true);
 
-    if (donorsError) {
-      console.error('Donor query failed:', donorsError);
-      return NextResponse.json({ error: 'Donor query failed' }, { status: 500 });
+      if (!wilayaError && wilayaDonors && wilayaDonors.length > donors.length) {
+        donors = wilayaDonors;
+        dispatchScope = 'wilaya_fallback';
+      }
     }
 
     if (!donors || donors.length === 0) {
@@ -83,12 +114,12 @@ export async function POST(req: NextRequest) {
         ok: true,
         notified_count: 0,
         matched_count: 0,
+        scope: dispatchScope,
         emergency_id: emergency.id,
       });
     }
 
     // 3. Compact Alert Card
-    const units = units_needed ?? 1;
     const alertText =
       `🚨 <b>نداء استغاثة عاجل للتبرع بالدم</b>\n\n` +
       `🏥 <b>المستشفى:</b> ${esc(hospital_name)}\n` +
@@ -105,7 +136,7 @@ export async function POST(req: NextRequest) {
       ],
     };
 
-    // 4. Dispatch
+    // 4. Send alerts in parallel
     const results = await Promise.allSettled(
       donors.map((d) => sendTelegramAlert(d.chat_id, alertText, keyboard))
     );
@@ -116,6 +147,8 @@ export async function POST(req: NextRequest) {
       ok: true,
       notified_count: sentCount,
       matched_count: donors.length,
+      scope: dispatchScope,
+      compatible_groups: compatibleBloodTypes,
       emergency_id: emergency.id,
     });
   } catch (err) {
